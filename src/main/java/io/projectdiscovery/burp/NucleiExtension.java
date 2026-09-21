@@ -58,6 +58,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -156,7 +157,7 @@ public class NucleiExtension implements BurpExtension {
         switch (event.invocationType()) {
             case MESSAGE_EDITOR_REQUEST:
             case MESSAGE_VIEWER_REQUEST: {
-                menuItems = createMenuItemsFromHttpRequest(generalSettings, targetUrl, requestResponse.request().toString(), selectionBounds);
+                menuItems = createMenuItemsFromHttpRequest(generalSettings, targetUrl, () -> requestResponse.request().toString(), selectionBounds);
                 break;
             }
             case MESSAGE_EDITOR_RESPONSE:
@@ -211,7 +212,7 @@ public class NucleiExtension implements BurpExtension {
         return new URL(secure ? "https" : "http", httpService.host(), urlPort, "/");
     }
 
-    private List<JMenuItem> createMenuItemsFromHttpRequest(GeneralSettings generalSettings, URL targetUrl, String request, int[] selectionBounds) {
+    private List<JMenuItem> createMenuItemsFromHttpRequest(GeneralSettings generalSettings, URL targetUrl, Supplier<String> request, int[] selectionBounds) {
         final JMenuItem generateTemplateContextMenuItem = createTemplateWithHttpRequestContextMenuItem(generalSettings, request, targetUrl);
         final JMenuItem generateIntruderTemplateMenuItem = createIntruderTemplateMenuItem(generalSettings, targetUrl, request, selectionBounds);
 
@@ -221,7 +222,7 @@ public class NucleiExtension implements BurpExtension {
             menuItems.add(generateIntruderTemplateMenuItem);
         }
 
-        final Set<JMenuItem> addToTabMenuItems = createAddRequestToTabContextMenuItems(generalSettings, new String[]{request});
+        final Set<JMenuItem> addToTabMenuItems = createAddRequestToTabContextMenuItems(generalSettings, () -> new String[]{request.get()});
         if (!addToTabMenuItems.isEmpty()) {
             final JMenu addRequestToTabMenu = new JMenu("Add request to");
             addToTabMenuItems.forEach(addRequestToTabMenu::add);
@@ -236,13 +237,17 @@ public class NucleiExtension implements BurpExtension {
             return Collections.emptyList();
         }
 
-        final HttpResponse response = requestResponse.response();
-        final TemplateMatcher contentMatcher = TemplateUtils.createContentMatcher(response.toByteArray().getBytes(), response.bodyOffset(), selectionBounds, NucleiExtension::bytesToString);
+        // Parsing the response body and serialising the request are deferred to the action,
+        // so right clicking a large response does not stall the menu.
+        final Supplier<TemplateMatcher> contentMatcher = () -> {
+            final HttpResponse response = requestResponse.response();
+            return TemplateUtils.createContentMatcher(response.toByteArray().getBytes(), response.bodyOffset(), selectionBounds, NucleiExtension::bytesToString);
+        };
 
-        final JMenuItem generateTemplateContextMenuItem = createContextMenuItem(() -> generateTemplate(generalSettings, contentMatcher, targetUrl, requestResponse), GENERATE_CONTEXT_MENU_TEXT);
+        final JMenuItem generateTemplateContextMenuItem = createContextMenuItem(() -> generateTemplate(generalSettings, contentMatcher.get(), targetUrl, requestResponse), GENERATE_CONTEXT_MENU_TEXT);
 
         final List<JMenuItem> menuItems;
-        final String[] request = {requestResponse.request().toString()};
+        final Supplier<String[]> request = () -> new String[]{requestResponse.request().toString()};
         final Set<JMenuItem> addToTabMenuItems = createAddMatcherToTabContextMenuItems(generalSettings, contentMatcher, request);
         if (addToTabMenuItems.isEmpty()) {
             menuItems = List.of(generateTemplateContextMenuItem);
@@ -256,14 +261,16 @@ public class NucleiExtension implements BurpExtension {
     }
 
     private List<JMenuItem> createMenuItemsFromProxyHistory(GeneralSettings generalSettings, URL targetUrl, List<HttpRequestResponse> selectedRequestResponses) {
-        final String[] requests = selectedRequestResponses.stream()
-                                                          .map(requestResponse -> requestResponse.request().toString())
-                                                          .toArray(String[]::new);
+        // A bulk selection can be large, so serialising it is deferred to the action.
+        final Supplier<String[]> requests = () -> selectedRequestResponses.stream()
+                                                                          .map(requestResponse -> requestResponse.request().toString())
+                                                                          .toArray(String[]::new);
 
-        final Http templateRequests = new Http();
-        templateRequests.setRaw(requests);
-
-        final List<JMenuItem> menuItems = new ArrayList<>(List.of(createContextMenuItem(() -> generateTemplate(generalSettings, targetUrl, templateRequests), GENERATE_CONTEXT_MENU_TEXT)));
+        final List<JMenuItem> menuItems = new ArrayList<>(List.of(createContextMenuItem(() -> {
+            final Http templateRequests = new Http();
+            templateRequests.setRaw(requests.get());
+            generateTemplate(generalSettings, targetUrl, templateRequests);
+        }, GENERATE_CONTEXT_MENU_TEXT)));
 
         final Set<JMenuItem> addToTabMenuItems = createAddRequestToTabContextMenuItems(generalSettings, requests);
         if (!addToTabMenuItems.isEmpty()) {
@@ -275,10 +282,11 @@ public class NucleiExtension implements BurpExtension {
         return menuItems;
     }
 
-    private static Set<JMenuItem> createAddRequestToTabContextMenuItems(GeneralSettings generalSettings, String[] requests) {
+    private static Set<JMenuItem> createAddRequestToTabContextMenuItems(GeneralSettings generalSettings, Supplier<String[]> requests) {
         return createAddToTabContextMenuItems(generalSettings, template -> {
-            final Consumer<Http> firstRequestConsumer = firstRequest -> firstRequest.addRaw(requests);
-            createContextMenuActionHandlingMultiRequests(template, requests, firstRequestConsumer, "request");
+            final String[] rawRequests = requests.get();
+            final Consumer<Http> firstRequestConsumer = firstRequest -> firstRequest.addRaw(rawRequests);
+            createContextMenuActionHandlingMultiRequests(template, rawRequests, firstRequestConsumer, "request");
         });
     }
 
@@ -289,19 +297,21 @@ public class NucleiExtension implements BurpExtension {
                         .findFirst();
     }
 
-    private JMenuItem createTemplateWithHttpRequestContextMenuItem(GeneralSettings generalSettings, String request, URL targetUrl) {
-        final Http requests = new Http();
-        requests.setRaw(request);
-        return createContextMenuItem(() -> generateTemplate(generalSettings, targetUrl, requests), GENERATE_CONTEXT_MENU_TEXT);
+    private JMenuItem createTemplateWithHttpRequestContextMenuItem(GeneralSettings generalSettings, Supplier<String> request, URL targetUrl) {
+        return createContextMenuItem(() -> {
+            final Http requests = new Http();
+            requests.setRaw(request.get());
+            generateTemplate(generalSettings, targetUrl, requests);
+        }, GENERATE_CONTEXT_MENU_TEXT);
     }
 
-    private JMenuItem createIntruderTemplateMenuItem(GeneralSettings generalSettings, URL targetUrl, String request, int[] selectionBounds) {
+    private JMenuItem createIntruderTemplateMenuItem(GeneralSettings generalSettings, URL targetUrl, Supplier<String> request, int[] selectionBounds) {
         final JMenuItem generateIntruderTemplateMenuItem;
         final int startSelectionIndex = selectionBounds[0];
         final int endSelectionIndex = selectionBounds[1];
         if (endSelectionIndex - startSelectionIndex > 0) {
             generateIntruderTemplateMenuItem = createContextMenuItem(() -> {
-                final StringBuilder requestModifier = new StringBuilder(request);
+                final StringBuilder requestModifier = new StringBuilder(request.get());
                 requestModifier.insert(startSelectionIndex, TemplateUtils.INTRUDER_PAYLOAD_MARKER);
                 requestModifier.insert(endSelectionIndex + 1, TemplateUtils.INTRUDER_PAYLOAD_MARKER);
 
@@ -313,13 +323,14 @@ public class NucleiExtension implements BurpExtension {
         return generateIntruderTemplateMenuItem;
     }
 
-    private static Set<JMenuItem> createAddMatcherToTabContextMenuItems(GeneralSettings generalSettings, TemplateMatcher contentMatcher, String[] httpRequest) {
+    private static Set<JMenuItem> createAddMatcherToTabContextMenuItems(GeneralSettings generalSettings, Supplier<TemplateMatcher> contentMatcher, Supplier<String[]> httpRequest) {
         return createAddToTabContextMenuItems(generalSettings, template -> {
+            final TemplateMatcher matcher = contentMatcher.get();
             final Consumer<Http> firstRequestConsumer = firstRequest -> {
                 final List<TemplateMatcher> matchers = firstRequest.getMatchers();
-                firstRequest.setMatchers(Utils.createNewList(matchers, contentMatcher));
+                firstRequest.setMatchers(Utils.createNewList(matchers, matcher));
             };
-            createContextMenuActionHandlingMultiRequests(template, httpRequest, firstRequestConsumer, "matcher");
+            createContextMenuActionHandlingMultiRequests(template, httpRequest.get(), firstRequestConsumer, "matcher");
         });
     }
 
