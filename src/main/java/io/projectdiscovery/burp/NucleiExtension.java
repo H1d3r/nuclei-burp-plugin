@@ -44,6 +44,7 @@ import io.projectdiscovery.nuclei.model.util.TransformedRequest;
 import io.projectdiscovery.nuclei.util.SchemaUtils;
 import io.projectdiscovery.nuclei.util.TemplateUtils;
 import io.projectdiscovery.nuclei.yaml.YamlUtil;
+import io.projectdiscovery.utils.CommandLineUtils;
 import io.projectdiscovery.utils.Utils;
 import io.projectdiscovery.utils.gui.SwingUtils;
 
@@ -92,6 +93,14 @@ public class NucleiExtension implements BurpExtension {
             initializeNucleiYamlSchema(generalSettings);
 
             api.userInterface().registerContextMenuItemsProvider(createContextMenuItemsProvider(generalSettings));
+
+            // Without this the background threads outlive the extension and accumulate
+            // every time it is reloaded.
+            api.extension().registerUnloadingHandler(() -> {
+                CommandLineUtils.shutdown();
+                TemplateGeneratorTabbedPane.shutdown();
+                generalSettings.log("Nuclei extension unloaded.");
+            });
         } catch (Throwable e) {
             JOptionPane.showMessageDialog(null, "There was an error while trying to initialize the plugin. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
             generalSettings.logError("Error while trying to initialize the plugin", e);
