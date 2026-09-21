@@ -30,6 +30,7 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.Range;
 import burp.api.montoya.http.HttpService;
 import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.persistence.Preferences;
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
@@ -50,6 +51,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.net.MalformedURLException;
+import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -81,6 +83,7 @@ public class NucleiExtension implements BurpExtension {
                 .withErrorConsumer(api.logging()::logToError)
                 .withExtensionSettingSaver(preferences::setString)
                 .withExtensionSettingLoader(preferences::getString)
+                .withHttpGetter(uri -> sendThroughBurp(api, uri))
                 .build();
 
         try {
@@ -438,5 +441,35 @@ public class NucleiExtension implements BurpExtension {
      */
     private static String bytesToString(byte[] bytes) {
         return new String(bytes, StandardCharsets.ISO_8859_1);
+    }
+
+    /**
+     * Sends a GET through Burp rather than a direct connection, so the upstream proxy
+     * configured by the user applies.
+     *
+     * @return the response body for a 200, otherwise empty
+     */
+    private static Optional<String> sendThroughBurp(MontoyaApi api, URI uri) {
+        try {
+            final HttpRequestResponse result = api.http().sendRequest(HttpRequest.httpRequestFromUrl(uri.toString()));
+
+            if (!result.hasResponse()) {
+                api.logging().logToError(String.format("No response received from '%s'", uri));
+                return Optional.empty();
+            }
+
+            final HttpResponse response = result.response();
+            final short statusCode = response.statusCode();
+            if (statusCode != 200) {
+                final String hint = (statusCode == 403 || statusCode == 429) ? " Clients without an API key are rate limited, so retrying in a few seconds may work." : "";
+                api.logging().logToError(String.format("'%s' returned HTTP %d.%s", uri, statusCode, hint));
+                return Optional.empty();
+            }
+
+            return Optional.of(response.bodyToString());
+        } catch (RuntimeException e) {
+            api.logging().logToError(String.format("Could not reach '%s'", uri), e);
+            return Optional.empty();
+        }
     }
 }

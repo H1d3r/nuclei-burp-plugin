@@ -44,6 +44,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.function.Function;
 
 public final class CveInfoRetriever {
 
@@ -75,6 +76,12 @@ public final class CveInfoRetriever {
         // The API matches the id case sensitively and answers 404 for a lower case one.
         final String normalizedCveId = cveId.toUpperCase(Locale.ROOT);
         final URI uri = URI.create(String.format("%s?cveId=%s", NVD_CVE_API_URL, URLEncoder.encode(normalizedCveId, StandardCharsets.UTF_8)));
+
+        // Prefer Burp's HTTP stack when available, so the user's upstream proxy applies.
+        final Optional<Function<URI, Optional<String>>> burpHttpGetter = generalSettings.getHttpGetter();
+        if (burpHttpGetter.isPresent()) {
+            return burpHttpGetter.get().apply(uri).map(body -> GSON.fromJson(body, NvdCveResponse.class));
+        }
 
         try {
             final HttpRequest httpRequest = HttpRequest.newBuilder(uri)
