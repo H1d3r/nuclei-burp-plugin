@@ -469,8 +469,9 @@ public final class TemplateGeneratorTab extends JPanel {
             if (Utils.isBlank(templateId)) {
                 JOptionPane.showMessageDialog(this, "Missing mandatory template id!", "Template error", JOptionPane.ERROR_MESSAGE);
             } else {
-                final Path generatedFilePath = targetTemplatePath.resolve(templateId + ".yaml");
-                saveTemplateToFile(generatedFilePath, yamlTemplate);
+                NucleiUtils.toSafeFileName(templateId)
+                           .ifPresentOrElse(fileName -> saveTemplateToFile(targetTemplatePath.resolve(fileName + ".yaml"), yamlTemplate),
+                                            () -> JOptionPane.showMessageDialog(this, "The template id cannot be used as a file name!", "Template error", JOptionPane.ERROR_MESSAGE));
             }
         });
     }
