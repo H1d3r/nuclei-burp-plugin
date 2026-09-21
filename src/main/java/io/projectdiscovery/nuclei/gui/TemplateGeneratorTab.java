@@ -341,34 +341,61 @@ public final class TemplateGeneratorTab extends JPanel {
     private JMenuItem createCveClassificationMenuItem() {
         final JMenuItem cveMenuItem = new JMenuItem("CVE");
 
-        cveMenuItem.addActionListener(e -> modifyTemplate(template -> {
+        cveMenuItem.addActionListener(e -> {
             final String cveId = JOptionPane.showInputDialog("Enter CVE ID (e.g. CVE-2021-1234):", "CVE-");
-
-            if (cveId != null) {
-                if (cveId.matches("(?i)cve-\\d{4}-\\d{4,7}")) {
-                    final Optional<CveInfo> cveInfo = CveInfoRetriever.getCveInfo(cveId, this.nucleiGeneratorSettings);
-                    cveInfo.map(cve -> {
-                        template.setId(cveId);
-                        final Info.Classification classification = new Info.Classification(cve.getId(), cve.getCvssMetrics(), cve.getCvssScore(), cve.getCweIds());
-                        final Info templateInfo = template.getInfo();
-                        templateInfo.setSeverity(cve.getSeverity());
-                        templateInfo.setDescriptionIfDefault(cve.getDescription());
-                        templateInfo.setReference(cve.getReferences());
-                        templateInfo.setClassification(classification);
-                        templateInfo.setTags(List.of("cve", cveId.substring(0, "cve-1234".length()).replace("-", "").toLowerCase())); // add cve and cveYEAR tags
-                        return template;
-                    }).orElseGet(() -> {
-                        JOptionPane.showMessageDialog(null, "Could not find CVE information. Please fill it manually.", "Could not find CVE information.", JOptionPane.WARNING_MESSAGE);
-                        template.getInfo().setClassification(new Info.Classification());
-                        return template;
-                    });
-                } else {
-                    JOptionPane.showMessageDialog(null, "Invalid CVE ID. Please use the CVE-2021-1234 format.", "Invalid CVE ID", JOptionPane.ERROR_MESSAGE);
-                }
+            if (cveId == null) {
+                return;
             }
-        }));
+
+            if (!cveId.matches("(?i)cve-\\d{4}-\\d{4,7}")) {
+                JOptionPane.showMessageDialog(this, "Invalid CVE ID. Please use the CVE-2021-1234 format.", "Invalid CVE ID", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            // The NVD lookup goes over the network, so it must not run on the event thread,
+            // otherwise the whole Burp UI freezes until it returns or times out.
+            cveMenuItem.setEnabled(false);
+            new SwingWorker<Optional<CveInfo>, Void>() {
+                @Override
+                protected Optional<CveInfo> doInBackground() {
+                    return CveInfoRetriever.getCveInfo(cveId, TemplateGeneratorTab.this.nucleiGeneratorSettings);
+                }
+
+                @Override
+                protected void done() {
+                    try {
+                        applyCveInfo(cveId, get());
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        TemplateGeneratorTab.this.nucleiGeneratorSettings.logError(String.format("Interrupted while retrieving '%s'", cveId), ex);
+                    } catch (ExecutionException ex) {
+                        TemplateGeneratorTab.this.nucleiGeneratorSettings.logError(String.format("Could not retrieve '%s'", cveId), ex);
+                    } finally {
+                        cveMenuItem.setEnabled(true);
+                    }
+                }
+            }.execute();
+        });
 
         return cveMenuItem;
+    }
+
+    private void applyCveInfo(String cveId, Optional<CveInfo> cveInfo) {
+        modifyTemplate(template -> cveInfo.map(cve -> {
+            template.setId(cveId);
+            final Info.Classification classification = new Info.Classification(cve.getId(), cve.getCvssMetrics(), cve.getCvssScore(), cve.getCweIds());
+            final Info templateInfo = template.getInfo();
+            templateInfo.setSeverity(cve.getSeverity());
+            templateInfo.setDescriptionIfDefault(cve.getDescription());
+            templateInfo.setReference(cve.getReferences());
+            templateInfo.setClassification(classification);
+            templateInfo.setTags(List.of("cve", cveId.substring(0, "cve-1234".length()).replace("-", "").toLowerCase())); // add cve and cveYEAR tags
+            return template;
+        }).orElseGet(() -> {
+            JOptionPane.showMessageDialog(this, "Could not find CVE information. Please fill it manually.", "Could not find CVE information.", JOptionPane.WARNING_MESSAGE);
+            template.getInfo().setClassification(new Info.Classification());
+            return template;
+        }));
     }
 
     private void modifyTemplate(Consumer<Template> templateConsumer) {
