@@ -72,11 +72,13 @@ public class NucleiExtension implements BurpExtension {
     private static final int HTTP_DEFAULT_PORT = 80;
     private static final int HTTPS_DEFAULT_PORT = 443;
 
+    private static MontoyaApi montoyaApi;
     private Map<String, String> yamlFieldDescriptionMap = new HashMap<>();
     private JTabbedPane nucleiTabbedPane;
 
     @Override
     public void initialize(MontoyaApi api) {
+        montoyaApi = api;
         api.extension().setName(EXTENSION_NAME);
 
         final Preferences preferences = api.persistence().preferences();
@@ -100,10 +102,11 @@ public class NucleiExtension implements BurpExtension {
             api.extension().registerUnloadingHandler(() -> {
                 CommandLineUtils.shutdown();
                 TemplateGeneratorTabbedPane.shutdown();
+                montoyaApi = null;
                 generalSettings.log("Nuclei extension unloaded.");
             });
         } catch (Throwable e) {
-            JOptionPane.showMessageDialog(null, "There was an error while trying to initialize the plugin. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(suiteFrame(), "There was an error while trying to initialize the plugin. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
             generalSettings.logError("Error while trying to initialize the plugin", e);
         }
     }
@@ -344,7 +347,7 @@ public class NucleiExtension implements BurpExtension {
             template.setHttp(List.of(newRequest));
         } else {
             if (requestSize > 1) {
-                JOptionPane.showMessageDialog(null, String.format("The %s will be added to the first request!", errorMessageContext), "Multiple requests present", JOptionPane.WARNING_MESSAGE);
+                JOptionPane.showMessageDialog(suiteFrame(), String.format("The %s will be added to the first request!", errorMessageContext), "Multiple requests present", JOptionPane.WARNING_MESSAGE);
             }
             firstTemplateRequestConsumer.accept(requests.iterator().next());
         }
@@ -423,7 +426,7 @@ public class NucleiExtension implements BurpExtension {
                     configureEmbeddedGeneratorTab(generalSettings, templateGeneratorTabContainer);
                 }
             } catch (Throwable e) {
-                JOptionPane.showMessageDialog(null, "There was an error while trying to complete the requested action. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(suiteFrame(), "There was an error while trying to complete the requested action. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
                 generalSettings.logError("Error while trying to generate/show the generated template", e);
             }
         });
@@ -491,5 +494,13 @@ public class NucleiExtension implements BurpExtension {
             api.logging().logToError(String.format("Could not reach '%s'", uri), e);
             return Optional.empty();
         }
+    }
+
+    /**
+     * @return Burp's own window, so dialogs open on the monitor Burp is on rather than
+     * wherever a null parent happens to place them
+     */
+    private static Component suiteFrame() {
+        return montoyaApi == null ? null : montoyaApi.userInterface().swingUtils().suiteFrame();
     }
 }
