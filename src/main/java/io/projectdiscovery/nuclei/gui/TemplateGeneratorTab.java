@@ -259,14 +259,10 @@ public final class TemplateGeneratorTab extends JPanel {
             @Override
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 1 && e.isControlDown()) { // Trigger on Ctrl + Click
-                    int offset = textEditor.viewToModel2D(e.getPoint());
-                    String url = getUrlAtOffset(textEditor, offset);
+                    final int offset = textEditor.viewToModel2D(e.getPoint());
+                    final String url = getUrlAtOffset(textEditor, offset);
                     if (url != null) {
-                        try {
-                            SwingUtils.openWebPage(new URI(url).toURL());
-                        } catch (IOException | URISyntaxException ex) {
-                            ex.printStackTrace();
-                        }
+                        openLinkWithConfirmation(url);
                     }
                 }
             }
@@ -286,14 +282,39 @@ public final class TemplateGeneratorTab extends JPanel {
                 end++;
             }
 
-            String potentialUrl = textEditor.getText(start, end - start);
+            final String potentialUrl = Utils.stripYamlDelimiters(textEditor.getText(start, end - start));
             if (potentialUrl.startsWith("http://") || potentialUrl.startsWith("https://")) {
                 return potentialUrl;
             }
         } catch (BadLocationException e) {
-            e.printStackTrace();
+            this.nucleiGeneratorSettings.logError("Could not read the clicked text from the template editor", e);
         }
         return null;
+    }
+
+    /**
+     * A template can carry URLs that came from a scanned response or a CVE reference, so a
+     * link to a local service is confirmed before the analyst's browser is pointed at it.
+     */
+    private void openLinkWithConfirmation(String url) {
+        try {
+            final URL parsedUrl = new URI(url).toURL();
+
+            if (Utils.isLocalAddress(parsedUrl.getHost())) {
+                final int choice = JOptionPane.showConfirmDialog(this,
+                                                                 String.format("This link points to a local address:%n%s%n%nOpen it anyway?", parsedUrl),
+                                                                 "Local address",
+                                                                 JOptionPane.YES_NO_OPTION,
+                                                                 JOptionPane.WARNING_MESSAGE);
+                if (choice != JOptionPane.YES_OPTION) {
+                    return;
+                }
+            }
+
+            SwingUtils.openWebPage(parsedUrl);
+        } catch (IOException | URISyntaxException | IllegalArgumentException e) {
+            this.nucleiGeneratorSettings.logError(String.format("Could not open '%s'", url), e);
+        }
     }
 
     private JMenu createTemplateEditorMenuItems() {
