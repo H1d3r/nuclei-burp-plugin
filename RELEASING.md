@@ -26,6 +26,15 @@ problem and comment `/resubmit` on that same issue. Do not open a second one.
 Emailing bapps@portswigger.net is no longer part of the process; the portal
 replaced it.
 
+## 3. After review feedback
+
+PortSwigger closes the submission issue when they leave feedback. Once it is
+addressed, run the **Reopen BApp submission** workflow to post `/reopen` on that
+issue. It finds the most recent submission issue on its own, so the issue number
+is only needed to target an older one.
+
+Never open a second submission issue for the same extension.
+
 ### Token
 
 Uses the organisation secret `PDTEAMX_CLASSIC_PAT`, so there is nothing to set up.
