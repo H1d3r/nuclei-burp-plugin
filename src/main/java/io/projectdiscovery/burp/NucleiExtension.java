@@ -30,6 +30,7 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.Range;
 import burp.api.montoya.http.HttpService;
 import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.persistence.Preferences;
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
@@ -43,6 +44,7 @@ import io.projectdiscovery.nuclei.model.util.TransformedRequest;
 import io.projectdiscovery.nuclei.util.SchemaUtils;
 import io.projectdiscovery.nuclei.util.TemplateUtils;
 import io.projectdiscovery.nuclei.yaml.YamlUtil;
+import io.projectdiscovery.utils.CommandLineUtils;
 import io.projectdiscovery.utils.Utils;
 import io.projectdiscovery.utils.gui.SwingUtils;
 
@@ -50,11 +52,13 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.net.MalformedURLException;
+import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -68,11 +72,13 @@ public class NucleiExtension implements BurpExtension {
     private static final int HTTP_DEFAULT_PORT = 80;
     private static final int HTTPS_DEFAULT_PORT = 443;
 
+    private static MontoyaApi montoyaApi;
     private Map<String, String> yamlFieldDescriptionMap = new HashMap<>();
     private JTabbedPane nucleiTabbedPane;
 
     @Override
     public void initialize(MontoyaApi api) {
+        montoyaApi = api;
         api.extension().setName(EXTENSION_NAME);
 
         final Preferences preferences = api.persistence().preferences();
@@ -81,6 +87,7 @@ public class NucleiExtension implements BurpExtension {
                 .withErrorConsumer(api.logging()::logToError)
                 .withExtensionSettingSaver(preferences::setString)
                 .withExtensionSettingLoader(preferences::getString)
+                .withHttpGetter(uri -> sendThroughBurp(api, uri))
                 .build();
 
         try {
@@ -89,8 +96,17 @@ public class NucleiExtension implements BurpExtension {
             initializeNucleiYamlSchema(generalSettings);
 
             api.userInterface().registerContextMenuItemsProvider(createContextMenuItemsProvider(generalSettings));
+
+            // Without this the background threads outlive the extension and accumulate
+            // every time it is reloaded.
+            api.extension().registerUnloadingHandler(() -> {
+                CommandLineUtils.shutdown();
+                TemplateGeneratorTabbedPane.shutdown();
+                montoyaApi = null;
+                generalSettings.log("Nuclei extension unloaded.");
+            });
         } catch (Throwable e) {
-            JOptionPane.showMessageDialog(null, "There was an error while trying to initialize the plugin. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(suiteFrame(), "There was an error while trying to initialize the plugin. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
             generalSettings.logError("Error while trying to initialize the plugin", e);
         }
     }
@@ -144,7 +160,7 @@ public class NucleiExtension implements BurpExtension {
         switch (event.invocationType()) {
             case MESSAGE_EDITOR_REQUEST:
             case MESSAGE_VIEWER_REQUEST: {
-                menuItems = createMenuItemsFromHttpRequest(generalSettings, targetUrl, requestResponse.request().toString(), selectionBounds);
+                menuItems = createMenuItemsFromHttpRequest(generalSettings, targetUrl, () -> requestResponse.request().toString(), selectionBounds);
                 break;
             }
             case MESSAGE_EDITOR_RESPONSE:
@@ -199,7 +215,7 @@ public class NucleiExtension implements BurpExtension {
         return new URL(secure ? "https" : "http", httpService.host(), urlPort, "/");
     }
 
-    private List<JMenuItem> createMenuItemsFromHttpRequest(GeneralSettings generalSettings, URL targetUrl, String request, int[] selectionBounds) {
+    private List<JMenuItem> createMenuItemsFromHttpRequest(GeneralSettings generalSettings, URL targetUrl, Supplier<String> request, int[] selectionBounds) {
         final JMenuItem generateTemplateContextMenuItem = createTemplateWithHttpRequestContextMenuItem(generalSettings, request, targetUrl);
         final JMenuItem generateIntruderTemplateMenuItem = createIntruderTemplateMenuItem(generalSettings, targetUrl, request, selectionBounds);
 
@@ -209,7 +225,7 @@ public class NucleiExtension implements BurpExtension {
             menuItems.add(generateIntruderTemplateMenuItem);
         }
 
-        final Set<JMenuItem> addToTabMenuItems = createAddRequestToTabContextMenuItems(generalSettings, new String[]{request});
+        final Set<JMenuItem> addToTabMenuItems = createAddRequestToTabContextMenuItems(generalSettings, () -> new String[]{request.get()});
         if (!addToTabMenuItems.isEmpty()) {
             final JMenu addRequestToTabMenu = new JMenu("Add request to");
             addToTabMenuItems.forEach(addRequestToTabMenu::add);
@@ -224,13 +240,17 @@ public class NucleiExtension implements BurpExtension {
             return Collections.emptyList();
         }
 
-        final HttpResponse response = requestResponse.response();
-        final TemplateMatcher contentMatcher = TemplateUtils.createContentMatcher(response.toByteArray().getBytes(), response.bodyOffset(), selectionBounds, NucleiExtension::bytesToString);
+        // Parsing the response body and serialising the request are deferred to the action,
+        // so right clicking a large response does not stall the menu.
+        final Supplier<TemplateMatcher> contentMatcher = () -> {
+            final HttpResponse response = requestResponse.response();
+            return TemplateUtils.createContentMatcher(response.toByteArray().getBytes(), response.bodyOffset(), selectionBounds, NucleiExtension::bytesToString);
+        };
 
-        final JMenuItem generateTemplateContextMenuItem = createContextMenuItem(() -> generateTemplate(generalSettings, contentMatcher, targetUrl, requestResponse), GENERATE_CONTEXT_MENU_TEXT);
+        final JMenuItem generateTemplateContextMenuItem = createContextMenuItem(() -> generateTemplate(generalSettings, contentMatcher.get(), targetUrl, requestResponse), GENERATE_CONTEXT_MENU_TEXT);
 
         final List<JMenuItem> menuItems;
-        final String[] request = {requestResponse.request().toString()};
+        final Supplier<String[]> request = () -> new String[]{requestResponse.request().toString()};
         final Set<JMenuItem> addToTabMenuItems = createAddMatcherToTabContextMenuItems(generalSettings, contentMatcher, request);
         if (addToTabMenuItems.isEmpty()) {
             menuItems = List.of(generateTemplateContextMenuItem);
@@ -244,14 +264,16 @@ public class NucleiExtension implements BurpExtension {
     }
 
     private List<JMenuItem> createMenuItemsFromProxyHistory(GeneralSettings generalSettings, URL targetUrl, List<HttpRequestResponse> selectedRequestResponses) {
-        final String[] requests = selectedRequestResponses.stream()
-                                                          .map(requestResponse -> requestResponse.request().toString())
-                                                          .toArray(String[]::new);
+        // A bulk selection can be large, so serialising it is deferred to the action.
+        final Supplier<String[]> requests = () -> selectedRequestResponses.stream()
+                                                                          .map(requestResponse -> requestResponse.request().toString())
+                                                                          .toArray(String[]::new);
 
-        final Http templateRequests = new Http();
-        templateRequests.setRaw(requests);
-
-        final List<JMenuItem> menuItems = new ArrayList<>(List.of(createContextMenuItem(() -> generateTemplate(generalSettings, targetUrl, templateRequests), GENERATE_CONTEXT_MENU_TEXT)));
+        final List<JMenuItem> menuItems = new ArrayList<>(List.of(createContextMenuItem(() -> {
+            final Http templateRequests = new Http();
+            templateRequests.setRaw(requests.get());
+            generateTemplate(generalSettings, targetUrl, templateRequests);
+        }, GENERATE_CONTEXT_MENU_TEXT)));
 
         final Set<JMenuItem> addToTabMenuItems = createAddRequestToTabContextMenuItems(generalSettings, requests);
         if (!addToTabMenuItems.isEmpty()) {
@@ -263,10 +285,11 @@ public class NucleiExtension implements BurpExtension {
         return menuItems;
     }
 
-    private static Set<JMenuItem> createAddRequestToTabContextMenuItems(GeneralSettings generalSettings, String[] requests) {
+    private static Set<JMenuItem> createAddRequestToTabContextMenuItems(GeneralSettings generalSettings, Supplier<String[]> requests) {
         return createAddToTabContextMenuItems(generalSettings, template -> {
-            final Consumer<Http> firstRequestConsumer = firstRequest -> firstRequest.addRaw(requests);
-            createContextMenuActionHandlingMultiRequests(template, requests, firstRequestConsumer, "request");
+            final String[] rawRequests = requests.get();
+            final Consumer<Http> firstRequestConsumer = firstRequest -> firstRequest.addRaw(rawRequests);
+            createContextMenuActionHandlingMultiRequests(template, rawRequests, firstRequestConsumer, "request");
         });
     }
 
@@ -277,19 +300,21 @@ public class NucleiExtension implements BurpExtension {
                         .findFirst();
     }
 
-    private JMenuItem createTemplateWithHttpRequestContextMenuItem(GeneralSettings generalSettings, String request, URL targetUrl) {
-        final Http requests = new Http();
-        requests.setRaw(request);
-        return createContextMenuItem(() -> generateTemplate(generalSettings, targetUrl, requests), GENERATE_CONTEXT_MENU_TEXT);
+    private JMenuItem createTemplateWithHttpRequestContextMenuItem(GeneralSettings generalSettings, Supplier<String> request, URL targetUrl) {
+        return createContextMenuItem(() -> {
+            final Http requests = new Http();
+            requests.setRaw(request.get());
+            generateTemplate(generalSettings, targetUrl, requests);
+        }, GENERATE_CONTEXT_MENU_TEXT);
     }
 
-    private JMenuItem createIntruderTemplateMenuItem(GeneralSettings generalSettings, URL targetUrl, String request, int[] selectionBounds) {
+    private JMenuItem createIntruderTemplateMenuItem(GeneralSettings generalSettings, URL targetUrl, Supplier<String> request, int[] selectionBounds) {
         final JMenuItem generateIntruderTemplateMenuItem;
         final int startSelectionIndex = selectionBounds[0];
         final int endSelectionIndex = selectionBounds[1];
         if (endSelectionIndex - startSelectionIndex > 0) {
             generateIntruderTemplateMenuItem = createContextMenuItem(() -> {
-                final StringBuilder requestModifier = new StringBuilder(request);
+                final StringBuilder requestModifier = new StringBuilder(request.get());
                 requestModifier.insert(startSelectionIndex, TemplateUtils.INTRUDER_PAYLOAD_MARKER);
                 requestModifier.insert(endSelectionIndex + 1, TemplateUtils.INTRUDER_PAYLOAD_MARKER);
 
@@ -301,13 +326,14 @@ public class NucleiExtension implements BurpExtension {
         return generateIntruderTemplateMenuItem;
     }
 
-    private static Set<JMenuItem> createAddMatcherToTabContextMenuItems(GeneralSettings generalSettings, TemplateMatcher contentMatcher, String[] httpRequest) {
+    private static Set<JMenuItem> createAddMatcherToTabContextMenuItems(GeneralSettings generalSettings, Supplier<TemplateMatcher> contentMatcher, Supplier<String[]> httpRequest) {
         return createAddToTabContextMenuItems(generalSettings, template -> {
+            final TemplateMatcher matcher = contentMatcher.get();
             final Consumer<Http> firstRequestConsumer = firstRequest -> {
                 final List<TemplateMatcher> matchers = firstRequest.getMatchers();
-                firstRequest.setMatchers(Utils.createNewList(matchers, contentMatcher));
+                firstRequest.setMatchers(Utils.createNewList(matchers, matcher));
             };
-            createContextMenuActionHandlingMultiRequests(template, httpRequest, firstRequestConsumer, "matcher");
+            createContextMenuActionHandlingMultiRequests(template, httpRequest.get(), firstRequestConsumer, "matcher");
         });
     }
 
@@ -321,7 +347,7 @@ public class NucleiExtension implements BurpExtension {
             template.setHttp(List.of(newRequest));
         } else {
             if (requestSize > 1) {
-                JOptionPane.showMessageDialog(null, String.format("The %s will be added to the first request!", errorMessageContext), "Multiple requests present", JOptionPane.WARNING_MESSAGE);
+                JOptionPane.showMessageDialog(suiteFrame(), String.format("The %s will be added to the first request!", errorMessageContext), "Multiple requests present", JOptionPane.WARNING_MESSAGE);
             }
             firstTemplateRequestConsumer.accept(requests.iterator().next());
         }
@@ -400,7 +426,7 @@ public class NucleiExtension implements BurpExtension {
                     configureEmbeddedGeneratorTab(generalSettings, templateGeneratorTabContainer);
                 }
             } catch (Throwable e) {
-                JOptionPane.showMessageDialog(null, "There was an error while trying to complete the requested action. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(suiteFrame(), "There was an error while trying to complete the requested action. Please check the logs.", "An error occurred", JOptionPane.ERROR_MESSAGE);
                 generalSettings.logError("Error while trying to generate/show the generated template", e);
             }
         });
@@ -438,5 +464,43 @@ public class NucleiExtension implements BurpExtension {
      */
     private static String bytesToString(byte[] bytes) {
         return new String(bytes, StandardCharsets.ISO_8859_1);
+    }
+
+    /**
+     * Sends a GET through Burp rather than a direct connection, so the upstream proxy
+     * configured by the user applies.
+     *
+     * @return the response body for a 200, otherwise empty
+     */
+    private static Optional<String> sendThroughBurp(MontoyaApi api, URI uri) {
+        try {
+            final HttpRequestResponse result = api.http().sendRequest(HttpRequest.httpRequestFromUrl(uri.toString()));
+
+            if (!result.hasResponse()) {
+                api.logging().logToError(String.format("No response received from '%s'", uri));
+                return Optional.empty();
+            }
+
+            final HttpResponse response = result.response();
+            final short statusCode = response.statusCode();
+            if (statusCode != 200) {
+                final String hint = (statusCode == 403 || statusCode == 429) ? " Clients without an API key are rate limited, so retrying in a few seconds may work." : "";
+                api.logging().logToError(String.format("'%s' returned HTTP %d.%s", uri, statusCode, hint));
+                return Optional.empty();
+            }
+
+            return Optional.of(response.bodyToString());
+        } catch (RuntimeException e) {
+            api.logging().logToError(String.format("Could not reach '%s'", uri), e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * @return Burp's own window, so dialogs open on the monitor Burp is on rather than
+     * wherever a null parent happens to place them
+     */
+    private static Component suiteFrame() {
+        return montoyaApi == null ? null : montoyaApi.userInterface().swingUtils().suiteFrame();
     }
 }
